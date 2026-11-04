@@ -10,16 +10,11 @@ Denná kontrola platnosti PZP pre zoznam vozidiel.
 - Ak je aspoň jedno vozidlo bez platného PZP (alebo sa nedá overiť),
   odošle e-mail na nastavených príjemcov.
 
-Nastavenie cez premenné prostredia (v GitHub Actions: Secrets / Variables):
-    PZP_URL          URL endpointu overenia (pozri návod nižšie)
-    PZP_METHOD       GET alebo POST (predvolené GET)
-    PZP_ECV_FIELD    názov parametra pre EČV (predvolené "ecv")
-    PZP_DATE_FIELD   názov parametra pre dátum (predvolené "date")
-    PZP_BODY_JSON    1 = poslať POST ako JSON, inak ako form-data (predvolené 0)
-    SMTP_HOST        predvolené smtp.gmail.com
-    SMTP_PORT        predvolené 465 (SSL)
+Nastavenie overovacieho endpointu je priamo v tomto súbore (sekcia
+"Nastavenie overenia PZP" nižšie). V GitHub Secrets sú potrebné iba:
     SMTP_USER        e-mailová adresa odosielateľa
     SMTP_PASSWORD    heslo aplikácie (Gmail App Password)
+Voliteľne: SMTP_HOST (predvolené smtp.gmail.com), SMTP_PORT (predvolené 465).
 
 Spustenie lokálne na test bez internetu a bez e-mailu:
     python check_pzp.py --demo
@@ -45,6 +40,15 @@ import requests
 TZ = ZoneInfo("Europe/Bratislava")
 
 RECIPIENTS = ["woletzd@gmail.com", "dusan.woletz@orange.com"]
+
+# ---- Nastavenie overenia PZP ------------------------------------------------
+# Hodnoty zistíte vo vývojárskych nástrojoch prehliadača (F12 -> Network) pri
+# ručnom overení EČV na nepoistenevozidlo.sk.
+PZP_URL = ""                # URL požiadavky, napr. "https://.../api/..."
+PZP_METHOD = "GET"          # "GET" alebo "POST"
+PZP_ECV_FIELD = "ecv"       # názov parametra s EČV
+PZP_DATE_FIELD = "date"     # názov parametra s dátumom (YYYY-MM-DD)
+PZP_BODY_JSON = False       # True = POST telo ako JSON, False = form-data
 
 # (EČV, značka/model, farba)
 VEHICLES = [
@@ -107,15 +111,13 @@ def is_insured(payload):
 
 def check_pzp(session, ecv, day):
     """Vráti (stav, detail) pre dané EČV a dátum `day` (YYYY-MM-DD)."""
-    url = os.environ.get("PZP_URL", "").strip()
+    url = PZP_URL.strip()
     if not url:
-        return UNKNOWN, "Nie je nastavená PZP_URL"
+        return UNKNOWN, "Nie je nastavená PZP_URL v skripte"
 
-    method = os.environ.get("PZP_METHOD", "GET").upper()
-    ecv_field = os.environ.get("PZP_ECV_FIELD", "ecv")
-    date_field = os.environ.get("PZP_DATE_FIELD", "date")
-    as_json = os.environ.get("PZP_BODY_JSON", "0") == "1"
-    data = {ecv_field: ecv, date_field: day}
+    method = PZP_METHOD.upper()
+    as_json = PZP_BODY_JSON
+    data = {PZP_ECV_FIELD: ecv, PZP_DATE_FIELD: day}
 
     last_error = ""
     for attempt in range(3):
