@@ -7,10 +7,19 @@ on:
 
 permissions:
   contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pzp-daily
+  cancel-in-progress: false
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
@@ -19,7 +28,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install requests
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
 
       - name: Check PZP
         env:
@@ -27,9 +38,21 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
         run: python check_pzp.py
 
-      - name: Upload report
+      - name: Upload debug screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pzp-report
-          path: report.html
+          name: pzp-debug
+          path: debug/
+          if-no-files-found: ignore
+
+      - name: Upload site
+        if: always()
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        if: always()
+        uses: actions/deploy-pages@v4
