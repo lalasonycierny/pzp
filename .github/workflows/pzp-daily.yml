@@ -10,7 +10,6 @@ permissions:
   pages: write
   id-token: write
 
-
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -23,6 +22,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Prepare folders
+        run: mkdir -p site debug
 
       - name: Install dependencies
         run: |
