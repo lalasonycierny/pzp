@@ -23,11 +23,6 @@ jobs:
 
       - name: Check PZP
         env:
-          PZP_URL: ${{ vars.PZP_URL }}
-          PZP_METHOD: ${{ vars.PZP_METHOD }}
-          PZP_ECV_FIELD: ${{ vars.PZP_ECV_FIELD }}
-          PZP_DATE_FIELD: ${{ vars.PZP_DATE_FIELD }}
-          PZP_BODY_JSON: ${{ vars.PZP_BODY_JSON }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
         run: python check_pzp.py
