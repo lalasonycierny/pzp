@@ -79,6 +79,15 @@ EMOJI = {VALID: "🟢", INVALID: "🔴", UNKNOWN: "🟠"}
 # Overenie PZP na stránke SKP (Playwright)
 # ----------------------------------------------------------------------------
 
+def snippet(text, length=200):
+    """Krátky výrez textu stránky (od "Zadané údaje"), na ladenie neznámych odpovedí."""
+    t = re.sub(r"\s+", " ", text)
+    i = t.find("Zadané údaje")
+    if i >= 0:
+        t = t[i:]
+    return t[:length]
+
+
 def parse_result(text, today):
     """
     Z textu výsledku určí stav. Vracia (stav, detail).
@@ -89,10 +98,10 @@ def parse_result(text, today):
     """
     t = re.sub(r"\s+", " ", text)
 
-    if re.search(r"žiadny záznam", t, re.IGNORECASE):
+    if re.search(r"žiadny záznam|nebol[a-z]* .{0,40}nájden|nenájden", t, re.IGNORECASE):
         return INVALID, "v databáze SKP nie je záznam"
 
-    if "Číslo poistnej zmluvy" in t:
+    if "Číslo poistnej zmluvy" in t or re.search(r"Poisťovateľ \S", t):
         insurer_m = re.search(r"Poisťovateľ (.+?) Číslo poistnej zmluvy", t)
         insurer = insurer_m.group(1).strip() if insurer_m else ""
 
@@ -110,7 +119,7 @@ def parse_result(text, today):
             return VALID, f"{insurer}, do {to_m.group(1)}"
         return VALID, insurer
 
-    return UNKNOWN, "Neznáma štruktúra odpovede"
+    return UNKNOWN, "Neznáma odpoveď: " + snippet(text)
 
 
 def _first_visible(candidates):
@@ -136,7 +145,7 @@ def _dismiss_cookies(page):
 
 
 def check_one(page, ecv, today):
-    """Overí jedno EČV. Vráti (stav, detail)."""
+    """Overí jedno EČV. Vráti (stav, detail, text_stránky)."""
     page.goto(PZP_PAGE_URL, wait_until="domcontentloaded", timeout=60000)
     try:
         page.wait_for_load_state("networkidle", timeout=20000)
@@ -150,7 +159,7 @@ def check_one(page, ecv, today):
         page.locator("input[type='text']"),
     ])
     if ecv_input is None:
-        return UNKNOWN, "Nenašlo sa pole pre EČV"
+        return UNKNOWN, "Nenašlo sa pole pre EČV", ""
     ecv_input.fill(ecv)
 
     # Dátum: vyplní sa iba ak je pole prázdne (inak ostane predvolený dnešný)
@@ -173,23 +182,29 @@ def check_one(page, ecv, today):
         page.get_by_text("Overiť poistenie", exact=False),
     ])
     if button is None:
-        return UNKNOWN, "Nenašlo sa tlačidlo Overiť poistenie"
+        return UNKNOWN, "Nenašlo sa tlačidlo Overiť poistenie", ""
     button.click()
 
-    # Výsledok je hotový, keď sa v zobrazenom texte objaví zadané EČV
-    # (pole input sa do innerText nepočíta, skryté šablóny tiež nie).
+    # Výsledok je hotový, keď sa v zobrazenom texte objaví zadané EČV a zároveň
+    # niektorý z typických textov výsledku (poisťovateľ / žiadny záznam).
     try:
         page.wait_for_function(
-            "(ecv) => document.body.innerText.toUpperCase().includes(ecv)",
+            """(ecv) => {
+                const t = document.body.innerText;
+                return t.toUpperCase().includes(ecv) &&
+                    /Číslo poistnej zmluvy|žiadny záznam|nenájden|Poisťovateľ/i.test(t);
+            }""",
             arg=ecv,
-            timeout=30000,
+            timeout=40000,
         )
     except Exception:  # noqa: BLE001
-        return UNKNOWN, "Výsledok sa nezobrazil (captcha / chyba stránky?)"
+        text = page.inner_text("body")
+        return UNKNOWN, "Výsledok sa nezobrazil: " + snippet(text), text
     time.sleep(1.5)  # doznie načítanie (spinner)
 
     text = page.inner_text("body")
-    return parse_result(text, today)
+    status, detail = parse_result(text, today)
+    return status, detail, text
 
 
 def run_checks(today):
@@ -213,10 +228,10 @@ def run_checks(today):
 
         for ecv, model, color in VEHICLES:
             ecv_norm = ecv.replace(" ", "").upper()
-            status, detail = UNKNOWN, ""
+            status, detail, text = UNKNOWN, "", ""
             for attempt in range(2):
                 try:
-                    status, detail = check_one(page, ecv_norm, today)
+                    status, detail, text = check_one(page, ecv_norm, today)
                 except Exception as exc:  # noqa: BLE001
                     status, detail = UNKNOWN, f"{type(exc).__name__}: {str(exc)[:120]}"
                 if status != UNKNOWN:
@@ -225,6 +240,8 @@ def run_checks(today):
             if status == UNKNOWN:
                 try:
                     page.screenshot(path=os.path.join(DEBUG_DIR, f"{ecv_norm}.png"), full_page=True)
+                    with open(os.path.join(DEBUG_DIR, f"{ecv_norm}.txt"), "w", encoding="utf-8") as f:
+                        f.write(text or page.inner_text("body"))
                 except Exception:  # noqa: BLE001
                     pass
             results.append(
