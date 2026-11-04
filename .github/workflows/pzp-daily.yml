@@ -1,0 +1,40 @@
+name: PZP daily check
+
+on:
+  schedule:
+    - cron: "0 5 * * *"   # každý deň 05:00 UTC (06:00/07:00 v Bratislave)
+  workflow_dispatch:       # umožňuje spustiť ručne z karty Actions
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Check PZP
+        env:
+          PZP_URL: ${{ vars.PZP_URL }}
+          PZP_METHOD: ${{ vars.PZP_METHOD }}
+          PZP_ECV_FIELD: ${{ vars.PZP_ECV_FIELD }}
+          PZP_DATE_FIELD: ${{ vars.PZP_DATE_FIELD }}
+          PZP_BODY_JSON: ${{ vars.PZP_BODY_JSON }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+        run: python check_pzp.py
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pzp-report
+          path: report.html
