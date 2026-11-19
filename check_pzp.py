@@ -12,7 +12,9 @@ Denná kontrola platnosti PZP pre zoznam vozidiel (SKP).
 V GitHub Secrets sú potrebné iba:
     SMTP_USER        e-mailová adresa odosielateľa
     SMTP_PASSWORD    heslo aplikácie (Gmail App Password)
-Voliteľne: SMTP_HOST (predvolené smtp.gmail.com), SMTP_PORT (predvolené 465).
+Voliteľne: SMTP_HOST (predvolené smtp.gmail.com), SMTP_PORT (predvolené 465;
+pri inom porte, napr. 587, sa použije STARTTLS).
+Odosielateľ e-mailu je vždy SMTP_USER.
 
 Lokálny test bez internetu a bez e-mailu:
     python check_pzp.py --demo
@@ -52,7 +54,7 @@ VEHICLES = [
     ("WWWWWWW", "OPEL AGILA 1.2/16V", "Zelená metalíza svetlá"),
     ("BA156AY", "HONDA SCV100", "Čierna metalíza"),
     ("III11II", "LAND ROVER Freelander 2", "Čierna metalíza"),
-    ("OOO0O00", "SUZUKI SWIFT", "Žlta mentolová"),
+    ("OOO0O00", "SUZUKI SWIFT", "-"),
     ("BA094AS", "TOMOS FLEXER", "Šedá metalíza"),
     ("BL043YM", "AGADOS NP 26 (prívesný vozík)", "Šedá"),
     ("BT732FP", "HONDA NSC110MPD", "Šedá"),
@@ -79,13 +81,13 @@ EMOJI = {VALID: "🟢", INVALID: "🔴", UNKNOWN: "🟠"}
 # Overenie PZP na stránke SKP (Playwright)
 # ----------------------------------------------------------------------------
 
-def snippet(text, length=200):
-    """Krátky výrez textu stránky (od "Zadané údaje"), na ladenie neznámych odpovedí."""
+def snippet(text, length=250):
+    """Krátky výrez textu stránky, na ladenie neznámych odpovedí."""
     t = re.sub(r"\s+", " ", text)
     i = t.find("Zadané údaje")
     if i >= 0:
-        t = t[i:]
-    return t[:length]
+        return t[i:i + length]
+    return t[-length:]
 
 
 def parse_result(text, today):
@@ -183,6 +185,17 @@ def check_one(page, ecv, today):
     ])
     if button is None:
         return UNKNOWN, "Nenašlo sa tlačidlo Overiť poistenie", ""
+    captured = []
+
+    def on_response(resp):
+        try:
+            req = resp.request
+            if req.resource_type in ("xhr", "fetch") or req.method == "POST":
+                captured.append(f"{req.method} {resp.status} {resp.url[:90]} :: {resp.text()[:200]}")
+        except Exception:  # noqa: BLE001
+            pass
+
+    page.on("response", on_response)
     button.click()
 
     # Výsledok je hotový, keď sa v zobrazenom texte objaví zadané EČV a zároveň
@@ -195,11 +208,17 @@ def check_one(page, ecv, today):
                     /Číslo poistnej zmluvy|žiadny záznam|nenájden|Poisťovateľ/i.test(t);
             }""",
             arg=ecv,
-            timeout=40000,
+            timeout=60000,
         )
     except Exception:  # noqa: BLE001
         text = page.inner_text("body")
-        return UNKNOWN, "Výsledok sa nezobrazil: " + snippet(text), text
+        net = " | ".join(captured[-2:]) if captured else "žiadna sieťová odpoveď"
+        return UNKNOWN, f"Výsledok sa nezobrazil [{net}] " + snippet(text, 150), text
+    finally:
+        try:
+            page.remove_listener("response", on_response)
+        except Exception:  # noqa: BLE001
+            pass
     time.sleep(1.5)  # doznie načítanie (spinner)
 
     text = page.inner_text("body")
@@ -229,7 +248,7 @@ def run_checks(today):
         for ecv, model, color in VEHICLES:
             ecv_norm = ecv.replace(" ", "").upper()
             status, detail, text = UNKNOWN, "", ""
-            for attempt in range(2):
+            for attempt in range(3):
                 try:
                     status, detail, text = check_one(page, ecv_norm, today)
                 except Exception as exc:  # noqa: BLE001
@@ -248,7 +267,7 @@ def run_checks(today):
                 {"ecv": ecv_norm, "model": model, "color": color, "status": status, "detail": detail}
             )
             print(f"{EMOJI[status]} {ecv_norm:8} {model}: {LABELS[status]} {detail}")
-            time.sleep(1)  # slušné tempo voči serveru
+            time.sleep(3)  # slušné tempo voči serveru
 
         browser.close()
     return results
@@ -332,8 +351,8 @@ def build_markdown(results, day):
 def send_email(results, day):
     user = os.environ.get("SMTP_USER", "").strip()
     password = os.environ.get("SMTP_PASSWORD", "").strip()
-    host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
-    port = int(os.environ.get("SMTP_PORT", "465"))
+    host = os.environ.get("SMTP_HOST", "").strip() or "smtp.gmail.com"
+    port = int(os.environ.get("SMTP_PORT", "").strip() or "465")
     if not user or not password:
         raise RuntimeError("Chýba SMTP_USER alebo SMTP_PASSWORD")
 
@@ -380,7 +399,12 @@ def send_email(results, day):
     msg.attach(MIMEText(text, "plain", "utf-8"))
     msg.attach(MIMEText(body_html, "html", "utf-8"))
 
-    with smtplib.SMTP_SSL(host, port, timeout=60) as server:
+    if port == 465:
+        server = smtplib.SMTP_SSL(host, port, timeout=60)
+    else:  # napr. 587 so STARTTLS (Outlook, Orange, ...)
+        server = smtplib.SMTP(host, port, timeout=60)
+        server.starttls()
+    with server:
         server.login(user, password)
         server.sendmail(user, RECIPIENTS, msg.as_string())
     print(f"E-mail odoslaný na: {', '.join(RECIPIENTS)}")
