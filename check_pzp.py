@@ -52,7 +52,7 @@ VEHICLES = [
     ("WWWWWWW", "OPEL AGILA 1.2/16V", "Zelená metalíza svetlá"),
     ("BA156AY", "HONDA SCV100", "Čierna metalíza"),
     ("III11II", "LAND ROVER Freelander 2", "Čierna metalíza"),
-    ("BA952AS", "PIAGGIO ZIP 50 2T", "Biela"),
+    ("OOO0O00", "SUZUKI SWIFT", "Žlta mentolová"),
     ("BA094AS", "TOMOS FLEXER", "Šedá metalíza"),
     ("BL043YM", "AGADOS NP 26 (prívesný vozík)", "Šedá"),
     ("BT732FP", "HONDA NSC110MPD", "Šedá"),
