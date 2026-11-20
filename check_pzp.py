@@ -14,7 +14,11 @@ V GitHub Secrets sú potrebné iba:
     SMTP_PASSWORD    heslo aplikácie (Gmail App Password)
 Voliteľne: SMTP_HOST (predvolené smtp.gmail.com), SMTP_PORT (predvolené 465;
 pri inom porte, napr. 587, sa použije STARTTLS).
-Odosielateľ e-mailu je vždy SMTP_USER.
+Najjednoduchšia alternatíva bez e-mailového účtu: jediný secret NTFY_TOPIC
+(ľubovoľný dlhý náhodný text, napr. pzp-k3v9x2mq7p4w). Pošle sa cez ntfy.sh,
+ktoré e-mail doručí každému príjemcovi. SMTP má prednosť, ak je nastavené.
+Voliteľne: SMTP_FROM = adresa odosielateľa (ak sa líši od SMTP_USER, napr. pri Brevo);
+ak chýba, odosielateľom je SMTP_USER.
 
 Lokálny test bez internetu a bez e-mailu:
     python check_pzp.py --demo
@@ -27,6 +31,7 @@ import re
 import smtplib
 import sys
 import time
+import urllib.request
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -124,6 +129,23 @@ def parse_result(text, today):
     return UNKNOWN, "Neznáma odpoveď: " + snippet(text)
 
 
+def interpret_api(api):
+    """
+    Z JSON odpovede SKP (wp-json/skp-p4r/v1/check) určí stav.
+    Príklad odpovede: {"ok": true, "status": "NEPOISTENÉ", "zmluvy": [], "warnings": []}
+    Vracia (stav alebo None, detail). None = odpoveď sa nedá vyhodnotiť.
+    """
+    if not isinstance(api, dict) or not api.get("ok"):
+        return None, ""
+    status = str(api.get("status", "")).upper()
+    contracts = api.get("zmluvy") or []
+    if "NEPOIST" in status:
+        return INVALID, "SKP: nepoistené (bez platnej zmluvy)"
+    if "POIST" in status or contracts:
+        return VALID, f"SKP: {api.get('status')}"
+    return None, ""
+
+
 def _first_visible(candidates):
     """Z kandidátov (Playwright locators) vráti prvý, ktorý existuje a je viditeľný."""
     for loc in candidates:
@@ -196,34 +218,52 @@ def check_one(page, ecv, today):
             pass
 
     page.on("response", on_response)
-    button.click()
-
-    # Výsledok je hotový, keď sa v zobrazenom texte objaví zadané EČV a zároveň
-    # niektorý z typických textov výsledku (poisťovateľ / žiadny záznam).
     try:
-        page.wait_for_function(
-            """(ecv) => {
-                const t = document.body.innerText;
-                return t.toUpperCase().includes(ecv) &&
-                    /Číslo poistnej zmluvy|žiadny záznam|nenájden|Poisťovateľ/i.test(t);
-            }""",
-            arg=ecv,
-            timeout=60000,
-        )
-    except Exception:  # noqa: BLE001
+        # Kliknutie a zachytenie JSON odpovede SKP (to je spoľahlivejšie než čítanie stránky)
+        api = None
+        try:
+            with page.expect_response(
+                lambda r: "skp-p4r/v1/check" in r.url, timeout=60000
+            ) as info:
+                button.click()
+            api = info.value.json()
+        except Exception:  # noqa: BLE001
+            api = None
+
+        api_status, api_detail = interpret_api(api)
+        if api_status == INVALID:
+            return INVALID, api_detail, ""
+
+        # Výsledok na stránke je hotový, keď sa v texte objaví zadané EČV a zároveň
+        # niektorý z typických textov výsledku (poisťovateľ / žiadny záznam).
+        try:
+            page.wait_for_function(
+                """(ecv) => {
+                    const t = document.body.innerText;
+                    return t.toUpperCase().includes(ecv) &&
+                        /Číslo poistnej zmluvy|žiadny záznam|nenájden|Poisťovateľ/i.test(t);
+                }""",
+                arg=ecv,
+                timeout=60000 if api_status is None else 15000,
+            )
+        except Exception:  # noqa: BLE001
+            text = page.inner_text("body")
+            if api_status == VALID:
+                return VALID, api_detail, text
+            net = " | ".join(captured[-2:]) if captured else "žiadna sieťová odpoveď"
+            return UNKNOWN, f"Výsledok sa nezobrazil [{net}] " + snippet(text, 150), text
+
+        time.sleep(1.5)  # doznie načítanie (spinner)
         text = page.inner_text("body")
-        net = " | ".join(captured[-2:]) if captured else "žiadna sieťová odpoveď"
-        return UNKNOWN, f"Výsledok sa nezobrazil [{net}] " + snippet(text, 150), text
+        status, detail = parse_result(text, today)
+        if status == UNKNOWN and api_status == VALID:
+            return VALID, api_detail, text
+        return status, detail, text
     finally:
         try:
             page.remove_listener("response", on_response)
         except Exception:  # noqa: BLE001
             pass
-    time.sleep(1.5)  # doznie načítanie (spinner)
-
-    text = page.inner_text("body")
-    status, detail = parse_result(text, today)
-    return status, detail, text
 
 
 def run_checks(today):
@@ -348,13 +388,46 @@ def build_markdown(results, day):
 # E-mail
 # ----------------------------------------------------------------------------
 
+def send_via_ntfy(results, day, topic):
+    """Pošle upozornenie cez ntfy.sh; ntfy ho doručí e-mailom každému príjemcovi."""
+    bad = [r for r in results if r["status"] == INVALID]
+    unknown = [r for r in results if r["status"] == UNKNOWN]
+    title = f"PZP {day}: {len(bad)}x neplatne, {len(unknown)}x neoverene"
+
+    lines = []
+    for r in results:
+        if r["status"] != VALID:
+            detail = f" ({r['detail']})" if r["detail"] else ""
+            lines.append(f"{r['ecv']} - {r['model']}: {LABELS[r['status']]}{detail}")
+    lines += ["", f"Prehľad: {PAGE_URL}"]
+    body = "\n".join(lines)[:3500]
+
+    for rcpt in RECIPIENTS:
+        req = urllib.request.Request(
+            f"https://ntfy.sh/{topic}",
+            data=body.encode("utf-8"),
+            method="POST",
+            headers={"Title": title, "Email": rcpt, "Tags": "warning", "Click": PAGE_URL},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            if resp.status >= 300:
+                raise RuntimeError(f"ntfy.sh vrátilo kód {resp.status}")
+        print(f"ntfy.sh: e-mail pre {rcpt} zadaný na odoslanie")
+
+
 def send_email(results, day):
     user = os.environ.get("SMTP_USER", "").strip()
     password = os.environ.get("SMTP_PASSWORD", "").strip()
     host = os.environ.get("SMTP_HOST", "").strip() or "smtp.gmail.com"
     port = int(os.environ.get("SMTP_PORT", "").strip() or "465")
     if not user or not password:
-        raise RuntimeError("Chýba SMTP_USER alebo SMTP_PASSWORD")
+        topic = os.environ.get("NTFY_TOPIC", "").strip()
+        if topic:
+            send_via_ntfy(results, day, topic)
+            return
+        raise RuntimeError("Chýba SMTP_USER/SMTP_PASSWORD aj NTFY_TOPIC")
+    # Adresa odosielateľa; ak SMTP_FROM chýba, použije sa SMTP_USER
+    sender = os.environ.get("SMTP_FROM", "").strip() or user
 
     bad = [r for r in results if r["status"] == INVALID]
     unknown = [r for r in results if r["status"] == UNKNOWN]
@@ -394,7 +467,7 @@ def send_email(results, day):
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"] = user
+    msg["From"] = sender
     msg["To"] = ", ".join(RECIPIENTS)
     msg.attach(MIMEText(text, "plain", "utf-8"))
     msg.attach(MIMEText(body_html, "html", "utf-8"))
@@ -406,7 +479,7 @@ def send_email(results, day):
         server.starttls()
     with server:
         server.login(user, password)
-        server.sendmail(user, RECIPIENTS, msg.as_string())
+        server.sendmail(sender, RECIPIENTS, msg.as_string())
     print(f"E-mail odoslaný na: {', '.join(RECIPIENTS)}")
 
 
