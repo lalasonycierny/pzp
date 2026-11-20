@@ -31,6 +31,7 @@ import re
 import smtplib
 import sys
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
@@ -402,6 +403,13 @@ def send_via_ntfy(results, day, topic):
     lines += ["", f"Prehľad: {PAGE_URL}"]
     body = "\n".join(lines)[:3500]
 
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", topic):
+        raise RuntimeError(
+            "NTFY_TOPIC má neplatný tvar: povolené sú iba písmená bez diakritiky, "
+            "čísla, - a _ (1 až 64 znakov), bez medzier"
+        )
+
+    errors = []
     for rcpt in RECIPIENTS:
         req = urllib.request.Request(
             f"https://ntfy.sh/{topic}",
@@ -409,10 +417,18 @@ def send_via_ntfy(results, day, topic):
             method="POST",
             headers={"Title": title, "Email": rcpt, "Tags": "warning", "Click": PAGE_URL},
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            if resp.status >= 300:
-                raise RuntimeError(f"ntfy.sh vrátilo kód {resp.status}")
-        print(f"ntfy.sh: e-mail pre {rcpt} zadaný na odoslanie")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                if resp.status >= 300:
+                    raise RuntimeError(f"ntfy.sh vrátilo kód {resp.status}")
+            print(f"ntfy.sh: e-mail pre {rcpt} zadaný na odoslanie")
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")[:300]
+            errors.append(f"{rcpt}: HTTP {exc.code} {detail}")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{rcpt}: {type(exc).__name__}: {exc}")
+    if errors:
+        raise RuntimeError("ntfy.sh zlyhalo: " + " | ".join(errors))
 
 
 def send_email(results, day):
